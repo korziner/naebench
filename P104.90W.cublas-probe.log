@@ -1,0 +1,25 @@
+GPU: NVIDIA P104-100 (SM 6.1)
+VRAM: 8.5 GB   Bus: 256-bit   Bandwidth: ~320 GB/s
+
+========================================================================
+  cuBLAS GEMM Tensor Core Probe  (2048x2048x2048, 50 iters)
+  Timing: CUDA events (accurate GPU time)
+  Correctness: C=A*B where A=B=ones, expect C[0]==2048
+========================================================================
+Mode                                              Time(s)   TFLOP/s  Check
+────────────────────────────────────────────────────────────────────────────
+FP16 | 16F DEFAULT                                 0.0000  344148.03     BAD!
+FP16 | 16F TENSOR_OP                               0.0000  339791.73     BAD!
+FP16 | 16F_PEDANTIC (no TC/FMA)                    0.0000  344148.03 *   BAD!
+FP16 | 16F ALGO_1 (CUDA cores)                     0.0000  344148.03     BAD!
+FP16 | 16F ALGO_2                                  0.0000  339791.73     BAD!
+FP16 | 16F ALGO_3                                  0.0000  348617.49     BAD!
+FP16 | 32F_PEDANTIC                                0.0035      4.96 *     OK
+FP16 | 32F DEFAULT (uses FMA)                      0.0035      4.96       OK
+FP16 | 32F_FAST_16F                                0.0035      4.96       OK
+FP16 | 32F_FAST_TF32                               0.0034      4.98       OK
+FP32 | 32F_PEDANTIC                                0.0034      5.03 *     OK
+FP32 | 32F DEFAULT                                 0.0034      5.07       OK
+FP32 | 32F ALGO_5                                  0.0034      5.07       OK
+────────────────────────────────────────────────────────────────────────────
+Best correct: FP32 | 32F ALGO_5 (5.07 TFLOP/s)

@@ -1,0 +1,800 @@
+// FP16 PTX kernels: f16x2 packed operations
+// f16x2 = two fp16 values packed into one 32-bit register
+// SM 6.1+: mul.f16x2 and add.f16x2 available
+// On CMP 50HX: FMA path may be slow, f16x2 mul+add is FASTEST
+
+// NOTE: single .version/.target for the whole file — sm_75 covers all kernels
+.version 8.0
+.target sm_75
+.address_size 64
+
+// ─── FP16 f16x2 MUL+ADD (no FMA) ───────────────────────────────────────────
+// On CMP 50HX: ~22 TFLOPS — best path for FP16 on broken FMA cards
+
+.visible .entry fp16_muladd(
+    .param .u64 ptr,
+    .param .u32 n,
+    .param .u32 reps
+) {
+    .reg .u32  %tid, %n, %reps, %i;
+    .reg .u64  %ptr, %addr;
+    .reg .b32  %a, %b, %c, %t;        // f16x2 stored as b32
+    .reg .pred %p;
+
+    mov.u32       %tid,  %tid.x;
+    ld.param.u64  %ptr,  [ptr];
+    ld.param.u32  %n,    [n];
+    ld.param.u32  %reps, [reps];
+
+    setp.ge.u32   %p, %tid, %n;
+    @%p ret;
+
+    cvt.u64.u32   %addr, %tid;
+    shl.b64       %addr, %addr, 2;    // *4 bytes (two f16)
+    add.u64       %addr, %addr, %ptr;
+
+    ld.global.b32 %a, [%addr];
+
+    // b = 1.0h packed x2: 0x3C003C00
+    mov.b32 %b, 0x3C003C00;
+    // c = 0.01h packed x2: 0x23D723D7
+    mov.b32 %c, 0x23D723D7;
+
+    mov.u32 %i, 0;
+
+LOOP_F16_MA:
+    mul.f16x2  %t, %a, %b;
+    add.f16x2  %a, %t, %c;
+    mul.f16x2  %t, %a, %b;
+    add.f16x2  %a, %t, %c;
+    mul.f16x2  %t, %a, %b;
+    add.f16x2  %a, %t, %c;
+    mul.f16x2  %t, %a, %b;
+    add.f16x2  %a, %t, %c;
+    mul.f16x2  %t, %a, %b;
+    add.f16x2  %a, %t, %c;
+    mul.f16x2  %t, %a, %b;
+    add.f16x2  %a, %t, %c;
+    mul.f16x2  %t, %a, %b;
+    add.f16x2  %a, %t, %c;
+    mul.f16x2  %t, %a, %b;
+    add.f16x2  %a, %t, %c;
+
+    add.u32  %i, %i, 32;
+    setp.lt.u32 %p, %i, %reps;
+    @%p bra LOOP_F16_MA;
+
+    st.global.b32 [%addr], %a;
+    ret;
+}
+
+// ─── FP16 f16x2 FMA ─────────────────────────────────────────────────────────
+
+.visible .entry fp16_fma(
+    .param .u64 ptr,
+    .param .u32 n,
+    .param .u32 reps
+) {
+    .reg .u32  %tid, %n, %reps, %i;
+    .reg .u64  %ptr, %addr;
+    .reg .b32  %a, %b, %c;
+    .reg .pred %p;
+
+    mov.u32       %tid,  %tid.x;
+    ld.param.u64  %ptr,  [ptr];
+    ld.param.u32  %n,    [n];
+    ld.param.u32  %reps, [reps];
+
+    setp.ge.u32   %p, %tid, %n;
+    @%p ret;
+
+    cvt.u64.u32   %addr, %tid;
+    shl.b64       %addr, %addr, 2;
+    add.u64       %addr, %addr, %ptr;
+
+    ld.global.b32 %a, [%addr];
+
+    mov.b32 %b, 0x3C003C00;
+    mov.b32 %c, 0x23D723D7;
+
+    mov.u32 %i, 0;
+
+LOOP_F16_FMA:
+    fma.rn.f16x2  %a, %a, %b, %c;
+    fma.rn.f16x2  %a, %a, %b, %c;
+    fma.rn.f16x2  %a, %a, %b, %c;
+    fma.rn.f16x2  %a, %a, %b, %c;
+    fma.rn.f16x2  %a, %a, %b, %c;
+    fma.rn.f16x2  %a, %a, %b, %c;
+    fma.rn.f16x2  %a, %a, %b, %c;
+    fma.rn.f16x2  %a, %a, %b, %c;
+
+    add.u32  %i, %i, 16;
+    setp.lt.u32 %p, %i, %reps;
+    @%p bra LOOP_F16_FMA;
+
+    st.global.b32 [%addr], %a;
+    ret;
+}
+
+// ─── FP32 explicit MUL+ADD (no FMA) ────────────────────────────────────────
+// Each thread processes one float, doing reps iterations of (a = a*b + c)
+// Using separate mul.f32 + add.f32 to prevent compiler fusing into FMA.
+
+.visible .entry fp32_muladd(
+    .param .u64 ptr,
+    .param .u32 n,
+    .param .u32 reps
+) {
+    .reg .u32 %tid, %n, %reps, %i;
+    .reg .u64 %ptr, %addr;
+    .reg .f32 %a, %b, %c, %t;
+    .reg .pred %p;
+
+    mov.u32       %tid,  %tid.x;
+    ld.param.u64  %ptr,  [ptr];
+    ld.param.u32  %n,    [n];
+    ld.param.u32  %reps, [reps];
+
+    setp.ge.u32   %p, %tid, %n;
+    @%p ret;
+
+    // addr = ptr + tid*4
+    cvt.u64.u32   %addr, %tid;
+    shl.b64       %addr, %addr, 2;
+    add.u64       %addr, %addr, %ptr;
+
+    ld.global.f32 %a, [%addr];
+
+    mov.f32 %b, 0f3F800000;   // 1.0f
+    mov.f32 %c, 0f3C23D70A;   // 0.01f
+
+    mov.u32 %i, 0;
+
+LOOP_FP32_MA:
+    mul.f32  %t, %a, %b;
+    add.f32  %a, %t, %c;
+    mul.f32  %t, %a, %b;
+    add.f32  %a, %t, %c;
+    mul.f32  %t, %a, %b;
+    add.f32  %a, %t, %c;
+    mul.f32  %t, %a, %b;
+    add.f32  %a, %t, %c;
+    mul.f32  %t, %a, %b;
+    add.f32  %a, %t, %c;
+    mul.f32  %t, %a, %b;
+    add.f32  %a, %t, %c;
+    mul.f32  %t, %a, %b;
+    add.f32  %a, %t, %c;
+    mul.f32  %t, %a, %b;
+    add.f32  %a, %t, %c;
+
+    add.u32  %i, %i, 16;
+    setp.lt.u32 %p, %i, %reps;
+    @%p bra LOOP_FP32_MA;
+
+    st.global.f32 [%addr], %a;
+    ret;
+}
+
+// ─── FP32 FMA ───────────────────────────────────────────────────────────────
+// Uses fma.rn.f32 — fused multiply-add.
+// On CMP/mining cards this path is BROKEN (14x slower).
+
+.visible .entry fp32_fma(
+    .param .u64 ptr,
+    .param .u32 n,
+    .param .u32 reps
+) {
+    .reg .u32 %tid, %n, %reps, %i;
+    .reg .u64 %ptr, %addr;
+    .reg .f32 %a, %b, %c;
+    .reg .pred %p;
+
+    mov.u32       %tid,  %tid.x;
+    ld.param.u64  %ptr,  [ptr];
+    ld.param.u32  %n,    [n];
+    ld.param.u32  %reps, [reps];
+
+    setp.ge.u32   %p, %tid, %n;
+    @%p ret;
+
+    cvt.u64.u32   %addr, %tid;
+    shl.b64       %addr, %addr, 2;
+    add.u64       %addr, %addr, %ptr;
+
+    ld.global.f32 %a, [%addr];
+
+    mov.f32 %b, 0f3F800000;
+    mov.f32 %c, 0f3C23D70A;
+
+    mov.u32 %i, 0;
+
+LOOP_FP32_FMA:
+    fma.rn.f32  %a, %a, %b, %c;
+    fma.rn.f32  %a, %a, %b, %c;
+    fma.rn.f32  %a, %a, %b, %c;
+    fma.rn.f32  %a, %a, %b, %c;
+    fma.rn.f32  %a, %a, %b, %c;
+    fma.rn.f32  %a, %a, %b, %c;
+    fma.rn.f32  %a, %a, %b, %c;
+    fma.rn.f32  %a, %a, %b, %c;
+
+    add.u32  %i, %i, 16;
+    setp.lt.u32 %p, %i, %reps;
+    @%p bra LOOP_FP32_FMA;
+
+    st.global.f32 [%addr], %a;
+    ret;
+}
+
+// ─── FP64 MUL+ADD ───────────────────────────────────────────────────────────
+// Diagnoses hardware FP64: GP100 is 1:2 FP64/FP32, consumer Pascal is 1/32.
+
+.visible .entry fp64_muladd(
+    .param .u64 ptr,
+    .param .u32 n,
+    .param .u32 reps
+) {
+    .reg .u32 %tid, %n, %reps, %i;
+    .reg .u64 %ptr, %addr;
+    .reg .f64 %a, %b, %c, %t;
+    .reg .pred %p;
+
+    mov.u32       %tid,  %tid.x;
+    ld.param.u64  %ptr,  [ptr];
+    ld.param.u32  %n,    [n];
+    ld.param.u32  %reps, [reps];
+
+    setp.ge.u32   %p, %tid, %n;
+    @%p ret;
+
+    cvt.u64.u32   %addr, %tid;
+    shl.b64       %addr, %addr, 3;    // *8 bytes (double)
+    add.u64       %addr, %addr, %ptr;
+
+    ld.global.f64 %a, [%addr];
+
+    mov.f64 %b, 0d3FF0000000000000;   // 1.0
+    mov.f64 %c, 0d3F847AE147AE147B;   // 0.01
+
+    mov.u32 %i, 0;
+
+LOOP_FP64_MA:
+    mul.f64  %t, %a, %b;
+    add.f64  %a, %t, %c;
+    mul.f64  %t, %a, %b;
+    add.f64  %a, %t, %c;
+    mul.f64  %t, %a, %b;
+    add.f64  %a, %t, %c;
+    mul.f64  %t, %a, %b;
+    add.f64  %a, %t, %c;
+
+    add.u32  %i, %i, 8;
+    setp.lt.u32 %p, %i, %reps;
+    @%p bra LOOP_FP64_MA;
+
+    st.global.f64 [%addr], %a;
+    ret;
+}
+
+// ─── INT8 dp4a s8×s8 → s32 (Q8_0 path, standard) ───────────────────────────
+
+.visible .entry int8_dp4a_s8s8(
+    .param .u64 ptr_a,
+    .param .u64 ptr_b,
+    .param .u64 ptr_c,
+    .param .u32 n,
+    .param .u32 reps
+) {
+    .reg .u32  %tid, %n, %reps, %i;
+    .reg .u64  %pa, %pb, %pc, %addr_a, %addr_b, %addr_c;
+    .reg .b32  %va, %vb;
+    .reg .s32  %acc;
+    .reg .pred %p;
+
+    mov.u32      %tid,  %tid.x;
+    ld.param.u64 %pa,   [ptr_a];
+    ld.param.u64 %pb,   [ptr_b];
+    ld.param.u64 %pc,   [ptr_c];
+    ld.param.u32 %n,    [n];
+    ld.param.u32 %reps, [reps];
+
+    setp.ge.u32  %p, %tid, %n;
+    @%p ret;
+
+    cvt.u64.u32  %addr_a, %tid;
+    shl.b64      %addr_a, %addr_a, 2;  // *4 bytes (4x int8 packed)
+    add.u64      %addr_a, %addr_a, %pa;
+
+    cvt.u64.u32  %addr_b, %tid;
+    shl.b64      %addr_b, %addr_b, 2;
+    add.u64      %addr_b, %addr_b, %pb;
+
+    cvt.u64.u32  %addr_c, %tid;
+    shl.b64      %addr_c, %addr_c, 2;
+    add.u64      %addr_c, %addr_c, %pc;
+
+    ld.global.b32 %va, [%addr_a];
+    ld.global.b32 %vb, [%addr_b];
+
+    mov.s32 %acc, 0;
+    mov.u32 %i, 0;
+
+LOOP_S8S8:
+    dp4a.s32.s32 %acc, %va, %vb, %acc;
+    dp4a.s32.s32 %acc, %va, %vb, %acc;
+    dp4a.s32.s32 %acc, %va, %vb, %acc;
+    dp4a.s32.s32 %acc, %va, %vb, %acc;
+    dp4a.s32.s32 %acc, %va, %vb, %acc;
+    dp4a.s32.s32 %acc, %va, %vb, %acc;
+    dp4a.s32.s32 %acc, %va, %vb, %acc;
+    dp4a.s32.s32 %acc, %va, %vb, %acc;
+
+    add.u32  %i, %i, 8;
+    setp.lt.u32 %p, %i, %reps;
+    @%p bra LOOP_S8S8;
+
+    st.global.s32 [%addr_c], %acc;
+    ret;
+}
+
+// ─── INT8 dp4a u8×u8 → s32 (unsigned symmetric) ────────────────────────────
+
+.visible .entry int8_dp4a_u8u8(
+    .param .u64 ptr_a,
+    .param .u64 ptr_b,
+    .param .u64 ptr_c,
+    .param .u32 n,
+    .param .u32 reps
+) {
+    .reg .u32  %tid, %n, %reps, %i;
+    .reg .u64  %pa, %pb, %pc, %addr_a, %addr_b, %addr_c;
+    .reg .b32  %va, %vb;
+    .reg .s32  %acc;
+    .reg .pred %p;
+
+    mov.u32      %tid,  %tid.x;
+    ld.param.u64 %pa,   [ptr_a];
+    ld.param.u64 %pb,   [ptr_b];
+    ld.param.u64 %pc,   [ptr_c];
+    ld.param.u32 %n,    [n];
+    ld.param.u32 %reps, [reps];
+
+    setp.ge.u32  %p, %tid, %n;
+    @%p ret;
+
+    cvt.u64.u32  %addr_a, %tid;
+    shl.b64      %addr_a, %addr_a, 2;
+    add.u64      %addr_a, %addr_a, %pa;
+
+    cvt.u64.u32  %addr_b, %tid;
+    shl.b64      %addr_b, %addr_b, 2;
+    add.u64      %addr_b, %addr_b, %pb;
+
+    cvt.u64.u32  %addr_c, %tid;
+    shl.b64      %addr_c, %addr_c, 2;
+    add.u64      %addr_c, %addr_c, %pc;
+
+    ld.global.b32 %va, [%addr_a];
+    ld.global.b32 %vb, [%addr_b];
+
+    mov.s32 %acc, 0;
+    mov.u32 %i, 0;
+
+LOOP_U8U8:
+    dp4a.u32.u32 %acc, %va, %vb, %acc;
+    dp4a.u32.u32 %acc, %va, %vb, %acc;
+    dp4a.u32.u32 %acc, %va, %vb, %acc;
+    dp4a.u32.u32 %acc, %va, %vb, %acc;
+    dp4a.u32.u32 %acc, %va, %vb, %acc;
+    dp4a.u32.u32 %acc, %va, %vb, %acc;
+    dp4a.u32.u32 %acc, %va, %vb, %acc;
+    dp4a.u32.u32 %acc, %va, %vb, %acc;
+
+    add.u32  %i, %i, 8;
+    setp.lt.u32 %p, %i, %reps;
+    @%p bra LOOP_U8U8;
+
+    st.global.s32 [%addr_c], %acc;
+    ret;
+}
+
+// ─── INT8 dp4a s8×u8 → s32 (asymmetric Q8_1 path) ──────────────────────────
+
+.visible .entry int8_dp4a_s8u8(
+    .param .u64 ptr_a,
+    .param .u64 ptr_b,
+    .param .u64 ptr_c,
+    .param .u32 n,
+    .param .u32 reps
+) {
+    .reg .u32  %tid, %n, %reps, %i;
+    .reg .u64  %pa, %pb, %pc, %addr_a, %addr_b, %addr_c;
+    .reg .b32  %va, %vb;
+    .reg .s32  %acc;
+    .reg .pred %p;
+
+    mov.u32      %tid,  %tid.x;
+    ld.param.u64 %pa,   [ptr_a];
+    ld.param.u64 %pb,   [ptr_b];
+    ld.param.u64 %pc,   [ptr_c];
+    ld.param.u32 %n,    [n];
+    ld.param.u32 %reps, [reps];
+
+    setp.ge.u32  %p, %tid, %n;
+    @%p ret;
+
+    cvt.u64.u32  %addr_a, %tid;
+    shl.b64      %addr_a, %addr_a, 2;
+    add.u64      %addr_a, %addr_a, %pa;
+
+    cvt.u64.u32  %addr_b, %tid;
+    shl.b64      %addr_b, %addr_b, 2;
+    add.u64      %addr_b, %addr_b, %pb;
+
+    cvt.u64.u32  %addr_c, %tid;
+    shl.b64      %addr_c, %addr_c, 2;
+    add.u64      %addr_c, %addr_c, %pc;
+
+    ld.global.b32 %va, [%addr_a];
+    ld.global.b32 %vb, [%addr_b];
+
+    mov.s32 %acc, 0;
+    mov.u32 %i, 0;
+
+LOOP_S8U8:
+    dp4a.s32.u32 %acc, %va, %vb, %acc;
+    dp4a.s32.u32 %acc, %va, %vb, %acc;
+    dp4a.s32.u32 %acc, %va, %vb, %acc;
+    dp4a.s32.u32 %acc, %va, %vb, %acc;
+    dp4a.s32.u32 %acc, %va, %vb, %acc;
+    dp4a.s32.u32 %acc, %va, %vb, %acc;
+    dp4a.s32.u32 %acc, %va, %vb, %acc;
+    dp4a.s32.u32 %acc, %va, %vb, %acc;
+
+    add.u32  %i, %i, 8;
+    setp.lt.u32 %p, %i, %reps;
+    @%p bra LOOP_S8U8;
+
+    st.global.s32 [%addr_c], %acc;
+    ret;
+}
+
+// ─── INT4 emulated via dp4a (Q4_K / Q4_0 GPU path) ─────────────────────────
+// Two INT4 values packed per byte → unpack before dp4a
+// prmt.b32 used for nibble extraction, then dp4a on 8 INT4 per iteration
+
+.visible .entry int4_via_dp4a(
+    .param .u64 ptr_a,
+    .param .u64 ptr_b,
+    .param .u64 ptr_c,
+    .param .u32 n,
+    .param .u32 reps
+) {
+    .reg .u32  %tid, %n, %reps, %i;
+    .reg .u64  %pa, %pb, %pc, %addr_a, %addr_b, %addr_c;
+    .reg .b32  %va, %vb, %ua, %ub;
+    .reg .s32  %acc;
+    .reg .pred %p;
+
+    mov.u32      %tid,  %tid.x;
+    ld.param.u64 %pa,   [ptr_a];
+    ld.param.u64 %pb,   [ptr_b];
+    ld.param.u64 %pc,   [ptr_c];
+    ld.param.u32 %n,    [n];
+    ld.param.u32 %reps, [reps];
+
+    setp.ge.u32  %p, %tid, %n;
+    @%p ret;
+
+    cvt.u64.u32  %addr_a, %tid;
+    shl.b64      %addr_a, %addr_a, 2;
+    add.u64      %addr_a, %addr_a, %pa;
+
+    cvt.u64.u32  %addr_b, %tid;
+    shl.b64      %addr_b, %addr_b, 2;
+    add.u64      %addr_b, %addr_b, %pb;
+
+    cvt.u64.u32  %addr_c, %tid;
+    shl.b64      %addr_c, %addr_c, 2;
+    add.u64      %addr_c, %addr_c, %pc;
+
+    ld.global.b32 %va, [%addr_a];    // 4 bytes = 8 INT4 values
+    ld.global.b32 %vb, [%addr_b];
+
+    mov.s32 %acc, 0;
+    mov.u32 %i, 0;
+
+LOOP_INT4:
+    // Extract lower nibbles: byte[k] & 0x0F
+    and.b32   %ua, %va, 0x0F0F0F0F;
+    and.b32   %ub, %vb, 0x0F0F0F0F;
+    dp4a.s32.s32 %acc, %ua, %ub, %acc;
+
+    // Extract upper nibbles (shift right by 4)
+    and.b32   %ua, %va, 0xF0F0F0F0;
+    shr.u32   %ua, %ua, 4;
+    and.b32   %ub, %vb, 0xF0F0F0F0;
+    shr.u32   %ub, %ub, 4;
+    dp4a.s32.s32 %acc, %ua, %ub, %acc;
+
+    add.u32  %i, %i, 2;
+    setp.lt.u32 %p, %i, %reps;
+    @%p bra LOOP_INT4;
+
+    st.global.s32 [%addr_c], %acc;
+    ret;
+}
+
+// ─── Bitwise XNOR + POPC (1-bit / binary neural nets) ──────────────────────
+// Binary weights: {-1, +1} encoded as bits
+// XNOR counts agreements, POPC sums them
+// Theoretical: 32x more ops/byte than INT8
+
+.visible .entry bitwise_xnor_popc(
+    .param .u64 ptr_a,
+    .param .u64 ptr_b,
+    .param .u64 ptr_c,
+    .param .u32 n,
+    .param .u32 reps
+) {
+    .reg .u32  %tid, %n, %reps, %i;
+    .reg .u64  %pa, %pb, %pc, %addr_a, %addr_b, %addr_c;
+    .reg .b32  %va, %vb, %xnor;
+    .reg .u32  %popc, %acc;
+    .reg .pred %p;
+
+    mov.u32      %tid,  %tid.x;
+    ld.param.u64 %pa,   [ptr_a];
+    ld.param.u64 %pb,   [ptr_b];
+    ld.param.u64 %pc,   [ptr_c];
+    ld.param.u32 %n,    [n];
+    ld.param.u32 %reps, [reps];
+
+    setp.ge.u32  %p, %tid, %n;
+    @%p ret;
+
+    cvt.u64.u32  %addr_a, %tid;
+    shl.b64      %addr_a, %addr_a, 2;
+    add.u64      %addr_a, %addr_a, %pa;
+
+    cvt.u64.u32  %addr_b, %tid;
+    shl.b64      %addr_b, %addr_b, 2;
+    add.u64      %addr_b, %addr_b, %pb;
+
+    cvt.u64.u32  %addr_c, %tid;
+    shl.b64      %addr_c, %addr_c, 2;
+    add.u64      %addr_c, %addr_c, %pc;
+
+    ld.global.b32 %va, [%addr_a];
+    ld.global.b32 %vb, [%addr_b];
+
+    mov.u32 %acc, 0;
+    mov.u32 %i, 0;
+
+LOOP_XNOR:
+    xor.b32   %xnor, %va, %vb;
+    not.b32   %xnor, %xnor;
+    popc.b32  %popc, %xnor;
+    add.u32   %acc, %acc, %popc;
+
+    xor.b32   %xnor, %va, %vb;
+    not.b32   %xnor, %xnor;
+    popc.b32  %popc, %xnor;
+    add.u32   %acc, %acc, %popc;
+
+    xor.b32   %xnor, %va, %vb;
+    not.b32   %xnor, %xnor;
+    popc.b32  %popc, %xnor;
+    add.u32   %acc, %acc, %popc;
+
+    xor.b32   %xnor, %va, %vb;
+    not.b32   %xnor, %xnor;
+    popc.b32  %popc, %xnor;
+    add.u32   %acc, %acc, %popc;
+
+    add.u32  %i, %i, 4;
+    setp.lt.u32 %p, %i, %reps;
+    @%p bra LOOP_XNOR;
+
+    st.global.u32 [%addr_c], %acc;
+    ret;
+}
+
+// ─── INT32 MAD throughput (accumulator baseline) ─────────────────────────────
+
+.visible .entry int32_mad(
+    .param .u64 ptr,
+    .param .u32 n,
+    .param .u32 reps
+) {
+    .reg .u32  %tid, %n, %reps, %i;
+    .reg .u64  %ptr, %addr;
+    .reg .s32  %a, %b, %c;
+    .reg .pred %p;
+
+    mov.u32      %tid,  %tid.x;
+    ld.param.u64 %ptr,  [ptr];
+    ld.param.u32 %n,    [n];
+    ld.param.u32 %reps, [reps];
+
+    setp.ge.u32  %p, %tid, %n;
+    @%p ret;
+
+    cvt.u64.u32  %addr, %tid;
+    shl.b64      %addr, %addr, 2;
+    add.u64      %addr, %addr, %ptr;
+
+    ld.global.s32 %a, [%addr];
+
+    mov.s32 %b, 3;
+    mov.s32 %c, 1;
+
+    mov.u32 %i, 0;
+
+LOOP_I32:
+    mad.lo.s32 %a, %a, %b, %c;
+    mad.lo.s32 %a, %a, %b, %c;
+    mad.lo.s32 %a, %a, %b, %c;
+    mad.lo.s32 %a, %a, %b, %c;
+    mad.lo.s32 %a, %a, %b, %c;
+    mad.lo.s32 %a, %a, %b, %c;
+    mad.lo.s32 %a, %a, %b, %c;
+    mad.lo.s32 %a, %a, %b, %c;
+
+    add.u32  %i, %i, 8;
+    setp.lt.u32 %p, %i, %reps;
+    @%p bra LOOP_I32;
+
+    st.global.s32 [%addr], %a;
+    ret;
+}
+
+// ─── WMMA FP16 → FP32 accumulator, m16n16k16 ────────────────────────────────
+// This is the standard Turing Tensor Core configuration.
+// RTX 2060: expect ~52 TFLOPS   CMP 50HX: likely BAD or 0.1 TFLOPS
+
+.visible .entry wmma_fp16_f32(
+    .param .u64 ptr_a,
+    .param .u64 ptr_b,
+    .param .u64 ptr_c,
+    .param .u32 n_iters
+) {
+    .reg .u64  %ra, %rb, %rc;
+    .reg .u32  %iters, %cnt;
+    .reg .pred %p;
+
+    // A fragment: 8 x b32 (f16x2 packed, 16x16 half matrix)
+    .reg .b32 %fa0, %fa1, %fa2, %fa3, %fa4, %fa5, %fa6, %fa7;
+    // B fragment
+    .reg .b32 %fb0, %fb1, %fb2, %fb3, %fb4, %fb5, %fb6, %fb7;
+    // C/D accumulator: 8 x f32
+    .reg .f32 %fc0, %fc1, %fc2, %fc3, %fc4, %fc5, %fc6, %fc7;
+
+    ld.param.u64 %ra,    [ptr_a];
+    ld.param.u64 %rb,    [ptr_b];
+    ld.param.u64 %rc,    [ptr_c];
+    ld.param.u32 %iters, [n_iters];
+
+    wmma.load.a.sync.aligned.row.m16n16k16.global.f16
+        {%fa0,%fa1,%fa2,%fa3,%fa4,%fa5,%fa6,%fa7}, [%ra], 16;
+    wmma.load.b.sync.aligned.col.m16n16k16.global.f16
+        {%fb0,%fb1,%fb2,%fb3,%fb4,%fb5,%fb6,%fb7}, [%rb], 16;
+    wmma.load.c.sync.aligned.row.m16n16k16.global.f32
+        {%fc0,%fc1,%fc2,%fc3,%fc4,%fc5,%fc6,%fc7}, [%rc], 16;
+
+    mov.u32 %cnt, 0;
+
+TC_FP16_LOOP:
+    wmma.mma.sync.aligned.row.col.m16n16k16.f32.f16.f16.f32
+        {%fc0,%fc1,%fc2,%fc3,%fc4,%fc5,%fc6,%fc7},
+        {%fa0,%fa1,%fa2,%fa3,%fa4,%fa5,%fa6,%fa7},
+        {%fb0,%fb1,%fb2,%fb3,%fb4,%fb5,%fb6,%fb7},
+        {%fc0,%fc1,%fc2,%fc3,%fc4,%fc5,%fc6,%fc7};
+
+    add.u32 %cnt, %cnt, 1;
+    setp.lt.u32 %p, %cnt, %iters;
+    @%p bra TC_FP16_LOOP;
+
+    wmma.store.d.sync.aligned.row.m16n16k16.global.f32
+        [%rc], {%fc0,%fc1,%fc2,%fc3,%fc4,%fc5,%fc6,%fc7}, 16;
+    ret;
+}
+
+// ─── WMMA FP16 → FP16 accumulator (faster but less precise) ────────────────
+
+.visible .entry wmma_fp16_f16(
+    .param .u64 ptr_a,
+    .param .u64 ptr_b,
+    .param .u64 ptr_c,
+    .param .u32 n_iters
+) {
+    .reg .u64  %ra, %rb, %rc;
+    .reg .u32  %iters, %cnt;
+    .reg .pred %p;
+
+    .reg .b32 %fa0, %fa1, %fa2, %fa3, %fa4, %fa5, %fa6, %fa7;
+    .reg .b32 %fb0, %fb1, %fb2, %fb3, %fb4, %fb5, %fb6, %fb7;
+    .reg .b32 %fc0, %fc1, %fc2, %fc3;       // FP16 accumulator (4 x f16x2)
+
+    ld.param.u64 %ra,    [ptr_a];
+    ld.param.u64 %rb,    [ptr_b];
+    ld.param.u64 %rc,    [ptr_c];
+    ld.param.u32 %iters, [n_iters];
+
+    wmma.load.a.sync.aligned.row.m16n16k16.global.f16
+        {%fa0,%fa1,%fa2,%fa3,%fa4,%fa5,%fa6,%fa7}, [%ra], 16;
+    wmma.load.b.sync.aligned.col.m16n16k16.global.f16
+        {%fb0,%fb1,%fb2,%fb3,%fb4,%fb5,%fb6,%fb7}, [%rb], 16;
+    wmma.load.c.sync.aligned.row.m16n16k16.global.f16
+        {%fc0,%fc1,%fc2,%fc3}, [%rc], 16;
+
+    mov.u32 %cnt, 0;
+
+TC_F16F16_LOOP:
+    wmma.mma.sync.aligned.row.col.m16n16k16.f16.f16.f16.f16
+        {%fc0,%fc1,%fc2,%fc3},
+        {%fa0,%fa1,%fa2,%fa3,%fa4,%fa5,%fa6,%fa7},
+        {%fb0,%fb1,%fb2,%fb3,%fb4,%fb5,%fb6,%fb7},
+        {%fc0,%fc1,%fc2,%fc3};
+
+    add.u32 %cnt, %cnt, 1;
+    setp.lt.u32 %p, %cnt, %iters;
+    @%p bra TC_F16F16_LOOP;
+
+    wmma.store.d.sync.aligned.row.m16n16k16.global.f16
+        [%rc], {%fc0,%fc1,%fc2,%fc3}, 16;
+    ret;
+}
+
+// ─── WMMA INT8 → INT32, m8n32k16 (Turing IMMA) ──────────────────────────────
+// INT8 Tensor Core: available on RTX 2060 (T4-class)
+// RTX 2060: ~104 TOPS INT8 TC  CMP 50HX: ~1.7 TOPS (broken!)
+
+.visible .entry wmma_int8_s32(
+    .param .u64 ptr_a,
+    .param .u64 ptr_b,
+    .param .u64 ptr_c,
+    .param .u32 n_iters
+) {
+    .reg .u64  %ra, %rb, %rc;
+    .reg .u32  %iters, %cnt;
+    .reg .pred %p;
+
+    // A: 2 x b32 for m8n32k16 s8 layout
+    .reg .b32  %ia0, %ia1;
+    // B: 8 x b32
+    .reg .b32  %ib0, %ib1, %ib2, %ib3, %ib4, %ib5, %ib6, %ib7;
+    // C/D: 8 x s32
+    .reg .s32  %ic0, %ic1, %ic2, %ic3, %ic4, %ic5, %ic6, %ic7;
+
+    ld.param.u64 %ra,    [ptr_a];
+    ld.param.u64 %rb,    [ptr_b];
+    ld.param.u64 %rc,    [ptr_c];
+    ld.param.u32 %iters, [n_iters];
+
+    wmma.load.a.sync.aligned.row.m8n32k16.global.s8
+        {%ia0,%ia1}, [%ra], 16;
+    wmma.load.b.sync.aligned.col.m8n32k16.global.s8
+        {%ib0,%ib1,%ib2,%ib3,%ib4,%ib5,%ib6,%ib7}, [%rb], 32;
+    wmma.load.c.sync.aligned.row.m8n32k16.global.s32
+        {%ic0,%ic1,%ic2,%ic3,%ic4,%ic5,%ic6,%ic7}, [%rc], 32;
+
+    mov.u32 %cnt, 0;
+
+TC_INT8_LOOP:
+    wmma.mma.sync.aligned.row.col.m8n32k16.s32.s8.s8.s32
+        {%ic0,%ic1,%ic2,%ic3,%ic4,%ic5,%ic6,%ic7},
+        {%ia0,%ia1},
+        {%ib0,%ib1,%ib2,%ib3,%ib4,%ib5,%ib6,%ib7},
+        {%ic0,%ic1,%ic2,%ic3,%ic4,%ic5,%ic6,%ic7};
+
+    add.u32 %cnt, %cnt, 1;
+    setp.lt.u32 %p, %cnt, %iters;
+    @%p bra TC_INT8_LOOP;
+
+    wmma.store.d.sync.aligned.row.m8n32k16.global.s32
+        [%rc], {%ic0,%ic1,%ic2,%ic3,%ic4,%ic5,%ic6,%ic7}, 32;
+    ret;
+}

@@ -1,0 +1,30 @@
+[package]
+name = "nbenchmark"
+version = "2.0.0"
+edition = "2021"
+description = "Full CUDA benchmark for Pascal/Turing: PTX kernels, cuBLAS probe, GGUF format advisor"
+authors = ["korziner"]
+
+[[bin]]
+name = "nbenchmark"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+
+# Build requirements:
+#   CUDA toolkit (nvcc, libcublas, libcuda)
+#   Rust 1.75+
+#
+# Build:
+#   cargo build --release
+#
+# The PTX kernels are embedded at compile time via include_str!()
+# and compiled at runtime via NVRTC or loaded via cuModuleLoadData.
+# Alternatively, pre-compile PTX with:
+#   nvcc -ptx -arch=sm_61 src/kernels/fp32.cu -o src/kernels/fp32_sm61.ptx

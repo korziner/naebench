@@ -1,0 +1,154 @@
+// WMMA Tensor Core kernels -- SM 7.5 (Turing) only
+// Direct PTX wmma.mma.sync bypasses cuBLAS black box
+// Reveals true Tensor Core state on RTX 2060 / 2060S / 2060-12G vs CMP 50HX
+
+.version 8.0
+.target sm_75
+.address_size 64
+
+// --- WMMA FP16 -> FP32 accumulator, m16n16k16 --------------------------------
+// RTX 2060: expect ~52 TFLOPS   CMP 50HX: likely broken or ~0.1 TFLOPS
+
+.visible .entry wmma_fp16_f32(
+    .param .u64 ptr_a,
+    .param .u64 ptr_b,
+    .param .u64 ptr_c,
+    .param .u32 n_iters
+) {
+    .reg .u64  %r_ra, %r_rb, %r_rc;
+    .reg .u32  %r_iters, %r_cnt;
+    .reg .pred %p;
+
+    // A fragment: 8 x b32 (f16x2 packed, 16x16 half matrix)
+    .reg .b32 %fa0, %fa1, %fa2, %fa3, %fa4, %fa5, %fa6, %fa7;
+    // B fragment
+    .reg .b32 %fb0, %fb1, %fb2, %fb3, %fb4, %fb5, %fb6, %fb7;
+    // C/D accumulator: 8 x f32
+    .reg .f32 %fc0, %fc1, %fc2, %fc3, %fc4, %fc5, %fc6, %fc7;
+
+    ld.param.u64 %r_ra,    [ptr_a];
+    ld.param.u64 %r_rb,    [ptr_b];
+    ld.param.u64 %r_rc,    [ptr_c];
+    ld.param.u32 %r_iters, [n_iters];
+
+    wmma.load.a.sync.aligned.row.m16n16k16.global.f16
+        {%fa0,%fa1,%fa2,%fa3,%fa4,%fa5,%fa6,%fa7}, [%r_ra], 16;
+    wmma.load.b.sync.aligned.col.m16n16k16.global.f16
+        {%fb0,%fb1,%fb2,%fb3,%fb4,%fb5,%fb6,%fb7}, [%r_rb], 16;
+    wmma.load.c.sync.aligned.row.m16n16k16.global.f32
+        {%fc0,%fc1,%fc2,%fc3,%fc4,%fc5,%fc6,%fc7}, [%r_rc], 16;
+
+    mov.u32 %r_cnt, 0;
+
+TC_FP16_LOOP:
+    wmma.mma.sync.aligned.row.col.m16n16k16.f32.f16.f16.f32
+        {%fc0,%fc1,%fc2,%fc3,%fc4,%fc5,%fc6,%fc7},
+        {%fa0,%fa1,%fa2,%fa3,%fa4,%fa5,%fa6,%fa7},
+        {%fb0,%fb1,%fb2,%fb3,%fb4,%fb5,%fb6,%fb7},
+        {%fc0,%fc1,%fc2,%fc3,%fc4,%fc5,%fc6,%fc7};
+
+    add.u32     %r_cnt, %r_cnt, 1;
+    setp.lt.u32 %p, %r_cnt, %r_iters;
+    @%p bra TC_FP16_LOOP;
+
+    wmma.store.d.sync.aligned.row.m16n16k16.global.f32
+        [%r_rc], {%fc0,%fc1,%fc2,%fc3,%fc4,%fc5,%fc6,%fc7}, 16;
+    ret;
+}
+
+// --- WMMA FP16 -> FP16 accumulator (faster but less precise) ----------------
+
+.visible .entry wmma_fp16_f16(
+    .param .u64 ptr_a,
+    .param .u64 ptr_b,
+    .param .u64 ptr_c,
+    .param .u32 n_iters
+) {
+    .reg .u64  %r_ra, %r_rb, %r_rc;
+    .reg .u32  %r_iters, %r_cnt;
+    .reg .pred %p;
+
+    .reg .b32 %fa0, %fa1, %fa2, %fa3, %fa4, %fa5, %fa6, %fa7;
+    .reg .b32 %fb0, %fb1, %fb2, %fb3, %fb4, %fb5, %fb6, %fb7;
+    // FP16 accumulator: 4 x b32 (each holds f16x2)
+    .reg .b32 %fc0, %fc1, %fc2, %fc3;
+
+    ld.param.u64 %r_ra,    [ptr_a];
+    ld.param.u64 %r_rb,    [ptr_b];
+    ld.param.u64 %r_rc,    [ptr_c];
+    ld.param.u32 %r_iters, [n_iters];
+
+    wmma.load.a.sync.aligned.row.m16n16k16.global.f16
+        {%fa0,%fa1,%fa2,%fa3,%fa4,%fa5,%fa6,%fa7}, [%r_ra], 16;
+    wmma.load.b.sync.aligned.col.m16n16k16.global.f16
+        {%fb0,%fb1,%fb2,%fb3,%fb4,%fb5,%fb6,%fb7}, [%r_rb], 16;
+    wmma.load.c.sync.aligned.row.m16n16k16.global.f16
+        {%fc0,%fc1,%fc2,%fc3}, [%r_rc], 16;
+
+    mov.u32 %r_cnt, 0;
+
+TC_F16F16_LOOP:
+    wmma.mma.sync.aligned.row.col.m16n16k16.f16.f16.f16.f16
+        {%fc0,%fc1,%fc2,%fc3},
+        {%fa0,%fa1,%fa2,%fa3,%fa4,%fa5,%fa6,%fa7},
+        {%fb0,%fb1,%fb2,%fb3,%fb4,%fb5,%fb6,%fb7},
+        {%fc0,%fc1,%fc2,%fc3};
+
+    add.u32     %r_cnt, %r_cnt, 1;
+    setp.lt.u32 %p, %r_cnt, %r_iters;
+    @%p bra TC_F16F16_LOOP;
+
+    wmma.store.d.sync.aligned.row.m16n16k16.global.f16
+        [%r_rc], {%fc0,%fc1,%fc2,%fc3}, 16;
+    ret;
+}
+
+// --- WMMA INT8 -> INT32, m8n32k16 (Turing IMMA) ------------------------------
+// RTX 2060: ~104 TOPS INT8 TC   CMP 50HX: ~1.7 TOPS (broken!)
+
+.visible .entry wmma_int8_s32(
+    .param .u64 ptr_a,
+    .param .u64 ptr_b,
+    .param .u64 ptr_c,
+    .param .u32 n_iters
+) {
+    .reg .u64  %r_ra, %r_rb, %r_rc;
+    .reg .u32  %r_iters, %r_cnt;
+    .reg .pred %p;
+
+    // A: 2 x b32 for m8n32k16 s8 layout
+    .reg .b32  %ia0, %ia1;
+    // B: 8 x b32
+    .reg .b32  %ib0, %ib1, %ib2, %ib3, %ib4, %ib5, %ib6, %ib7;
+    // C/D: 8 x s32
+    .reg .s32  %ic0, %ic1, %ic2, %ic3, %ic4, %ic5, %ic6, %ic7;
+
+    ld.param.u64 %r_ra,    [ptr_a];
+    ld.param.u64 %r_rb,    [ptr_b];
+    ld.param.u64 %r_rc,    [ptr_c];
+    ld.param.u32 %r_iters, [n_iters];
+
+    wmma.load.a.sync.aligned.row.m8n32k16.global.s8
+        {%ia0,%ia1}, [%r_ra], 16;
+    wmma.load.b.sync.aligned.col.m8n32k16.global.s8
+        {%ib0,%ib1,%ib2,%ib3,%ib4,%ib5,%ib6,%ib7}, [%r_rb], 32;
+    wmma.load.c.sync.aligned.row.m8n32k16.global.s32
+        {%ic0,%ic1,%ic2,%ic3,%ic4,%ic5,%ic6,%ic7}, [%r_rc], 32;
+
+    mov.u32 %r_cnt, 0;
+
+TC_INT8_LOOP:
+    wmma.mma.sync.aligned.row.col.m8n32k16.s32.s8.s8.s32
+        {%ic0,%ic1,%ic2,%ic3,%ic4,%ic5,%ic6,%ic7},
+        {%ia0,%ia1},
+        {%ib0,%ib1,%ib2,%ib3,%ib4,%ib5,%ib6,%ib7},
+        {%ic0,%ic1,%ic2,%ic3,%ic4,%ic5,%ic6,%ic7};
+
+    add.u32     %r_cnt, %r_cnt, 1;
+    setp.lt.u32 %p, %r_cnt, %r_iters;
+    @%p bra TC_INT8_LOOP;
+
+    wmma.store.d.sync.aligned.row.m8n32k16.global.s32
+        [%r_rc], {%ic0,%ic1,%ic2,%ic3,%ic4,%ic5,%ic6,%ic7}, 32;
+    ret;
+}

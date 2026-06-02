@@ -1,0 +1,381 @@
+// INT8 dp4a kernels: all four sign combinations
+// dp4a = dot product of 4 pairs of int8 -> int32 accumulator
+// SM 6.1+: dp4a PTX instruction available
+// This is the FASTEST path on Pascal for GGUF Q8_0 inference
+
+.version 8.0
+.target sm_61
+.address_size 64
+
+// --- INT8 dp4a s8 x s8 -> s32 (Q8_0 path, standard) ------------------------
+
+.visible .entry int8_dp4a_s8s8(
+    .param .u64 ptr_a,
+    .param .u64 ptr_b,
+    .param .u64 ptr_c,
+    .param .u32 n,
+    .param .u32 reps
+) {
+    .reg .u32  %r_tid, %r_n, %r_reps, %r_i;
+    .reg .u64  %r_pa, %r_pb, %r_pc, %r_aa, %r_ab, %r_ac;
+    .reg .b32  %r_va, %r_vb;
+    .reg .s32  %r_acc;
+    .reg .pred %p;
+
+    mov.u32      %r_tid,  %tid.x;
+    ld.param.u64 %r_pa,   [ptr_a];
+    ld.param.u64 %r_pb,   [ptr_b];
+    ld.param.u64 %r_pc,   [ptr_c];
+    ld.param.u32 %r_n,    [n];
+    ld.param.u32 %r_reps, [reps];
+
+    setp.ge.u32  %p, %r_tid, %r_n;
+    @%p ret;
+
+    cvt.u64.u32  %r_aa, %r_tid;
+    shl.b64      %r_aa, %r_aa, 2;
+    add.u64      %r_aa, %r_aa, %r_pa;
+
+    cvt.u64.u32  %r_ab, %r_tid;
+    shl.b64      %r_ab, %r_ab, 2;
+    add.u64      %r_ab, %r_ab, %r_pb;
+
+    cvt.u64.u32  %r_ac, %r_tid;
+    shl.b64      %r_ac, %r_ac, 2;
+    add.u64      %r_ac, %r_ac, %r_pc;
+
+    ld.global.b32 %r_va, [%r_aa];
+    ld.global.b32 %r_vb, [%r_ab];
+
+    mov.s32 %r_acc, 0;
+    mov.u32 %r_i, 0;
+
+LOOP_S8S8:
+    dp4a.s32.s32 %r_acc, %r_va, %r_vb, %r_acc;
+    dp4a.s32.s32 %r_acc, %r_va, %r_vb, %r_acc;
+    dp4a.s32.s32 %r_acc, %r_va, %r_vb, %r_acc;
+    dp4a.s32.s32 %r_acc, %r_va, %r_vb, %r_acc;
+    dp4a.s32.s32 %r_acc, %r_va, %r_vb, %r_acc;
+    dp4a.s32.s32 %r_acc, %r_va, %r_vb, %r_acc;
+    dp4a.s32.s32 %r_acc, %r_va, %r_vb, %r_acc;
+    dp4a.s32.s32 %r_acc, %r_va, %r_vb, %r_acc;
+
+    add.u32     %r_i, %r_i, 8;
+    setp.lt.u32 %p, %r_i, %r_reps;
+    @%p bra LOOP_S8S8;
+
+    st.global.s32 [%r_ac], %r_acc;
+    ret;
+}
+
+// --- INT8 dp4a u8 x u8 -> s32 (unsigned symmetric) --------------------------
+
+.visible .entry int8_dp4a_u8u8(
+    .param .u64 ptr_a,
+    .param .u64 ptr_b,
+    .param .u64 ptr_c,
+    .param .u32 n,
+    .param .u32 reps
+) {
+    .reg .u32  %r_tid, %r_n, %r_reps, %r_i;
+    .reg .u64  %r_pa, %r_pb, %r_pc, %r_aa, %r_ab, %r_ac;
+    .reg .b32  %r_va, %r_vb;
+    .reg .s32  %r_acc;
+    .reg .pred %p;
+
+    mov.u32      %r_tid,  %tid.x;
+    ld.param.u64 %r_pa,   [ptr_a];
+    ld.param.u64 %r_pb,   [ptr_b];
+    ld.param.u64 %r_pc,   [ptr_c];
+    ld.param.u32 %r_n,    [n];
+    ld.param.u32 %r_reps, [reps];
+
+    setp.ge.u32  %p, %r_tid, %r_n;
+    @%p ret;
+
+    cvt.u64.u32  %r_aa, %r_tid;
+    shl.b64      %r_aa, %r_aa, 2;
+    add.u64      %r_aa, %r_aa, %r_pa;
+
+    cvt.u64.u32  %r_ab, %r_tid;
+    shl.b64      %r_ab, %r_ab, 2;
+    add.u64      %r_ab, %r_ab, %r_pb;
+
+    cvt.u64.u32  %r_ac, %r_tid;
+    shl.b64      %r_ac, %r_ac, 2;
+    add.u64      %r_ac, %r_ac, %r_pc;
+
+    ld.global.b32 %r_va, [%r_aa];
+    ld.global.b32 %r_vb, [%r_ab];
+
+    mov.s32 %r_acc, 0;
+    mov.u32 %r_i, 0;
+
+LOOP_U8U8:
+    dp4a.u32.u32 %r_acc, %r_va, %r_vb, %r_acc;
+    dp4a.u32.u32 %r_acc, %r_va, %r_vb, %r_acc;
+    dp4a.u32.u32 %r_acc, %r_va, %r_vb, %r_acc;
+    dp4a.u32.u32 %r_acc, %r_va, %r_vb, %r_acc;
+    dp4a.u32.u32 %r_acc, %r_va, %r_vb, %r_acc;
+    dp4a.u32.u32 %r_acc, %r_va, %r_vb, %r_acc;
+    dp4a.u32.u32 %r_acc, %r_va, %r_vb, %r_acc;
+    dp4a.u32.u32 %r_acc, %r_va, %r_vb, %r_acc;
+
+    add.u32     %r_i, %r_i, 8;
+    setp.lt.u32 %p, %r_i, %r_reps;
+    @%p bra LOOP_U8U8;
+
+    st.global.s32 [%r_ac], %r_acc;
+    ret;
+}
+
+// --- INT8 dp4a s8 x u8 -> s32 (asymmetric Q8_1 path) ------------------------
+
+.visible .entry int8_dp4a_s8u8(
+    .param .u64 ptr_a,
+    .param .u64 ptr_b,
+    .param .u64 ptr_c,
+    .param .u32 n,
+    .param .u32 reps
+) {
+    .reg .u32  %r_tid, %r_n, %r_reps, %r_i;
+    .reg .u64  %r_pa, %r_pb, %r_pc, %r_aa, %r_ab, %r_ac;
+    .reg .b32  %r_va, %r_vb;
+    .reg .s32  %r_acc;
+    .reg .pred %p;
+
+    mov.u32      %r_tid,  %tid.x;
+    ld.param.u64 %r_pa,   [ptr_a];
+    ld.param.u64 %r_pb,   [ptr_b];
+    ld.param.u64 %r_pc,   [ptr_c];
+    ld.param.u32 %r_n,    [n];
+    ld.param.u32 %r_reps, [reps];
+
+    setp.ge.u32  %p, %r_tid, %r_n;
+    @%p ret;
+
+    cvt.u64.u32  %r_aa, %r_tid;
+    shl.b64      %r_aa, %r_aa, 2;
+    add.u64      %r_aa, %r_aa, %r_pa;
+
+    cvt.u64.u32  %r_ab, %r_tid;
+    shl.b64      %r_ab, %r_ab, 2;
+    add.u64      %r_ab, %r_ab, %r_pb;
+
+    cvt.u64.u32  %r_ac, %r_tid;
+    shl.b64      %r_ac, %r_ac, 2;
+    add.u64      %r_ac, %r_ac, %r_pc;
+
+    ld.global.b32 %r_va, [%r_aa];
+    ld.global.b32 %r_vb, [%r_ab];
+
+    mov.s32 %r_acc, 0;
+    mov.u32 %r_i, 0;
+
+LOOP_S8U8:
+    dp4a.s32.u32 %r_acc, %r_va, %r_vb, %r_acc;
+    dp4a.s32.u32 %r_acc, %r_va, %r_vb, %r_acc;
+    dp4a.s32.u32 %r_acc, %r_va, %r_vb, %r_acc;
+    dp4a.s32.u32 %r_acc, %r_va, %r_vb, %r_acc;
+    dp4a.s32.u32 %r_acc, %r_va, %r_vb, %r_acc;
+    dp4a.s32.u32 %r_acc, %r_va, %r_vb, %r_acc;
+    dp4a.s32.u32 %r_acc, %r_va, %r_vb, %r_acc;
+    dp4a.s32.u32 %r_acc, %r_va, %r_vb, %r_acc;
+
+    add.u32     %r_i, %r_i, 8;
+    setp.lt.u32 %p, %r_i, %r_reps;
+    @%p bra LOOP_S8U8;
+
+    st.global.s32 [%r_ac], %r_acc;
+    ret;
+}
+
+// --- INT4 emulated via dp4a (Q4_K / Q4_0 GPU path) --------------------------
+// Two INT4 values packed per byte -> unpack before dp4a
+// dp4a on 8 INT4 per iteration (lower + upper nibbles separately)
+
+.visible .entry int4_via_dp4a(
+    .param .u64 ptr_a,
+    .param .u64 ptr_b,
+    .param .u64 ptr_c,
+    .param .u32 n,
+    .param .u32 reps
+) {
+    .reg .u32  %r_tid, %r_n, %r_reps, %r_i;
+    .reg .u64  %r_pa, %r_pb, %r_pc, %r_aa, %r_ab, %r_ac;
+    .reg .b32  %r_va, %r_vb, %r_ua, %r_ub;
+    .reg .s32  %r_acc;
+    .reg .pred %p;
+
+    mov.u32      %r_tid,  %tid.x;
+    ld.param.u64 %r_pa,   [ptr_a];
+    ld.param.u64 %r_pb,   [ptr_b];
+    ld.param.u64 %r_pc,   [ptr_c];
+    ld.param.u32 %r_n,    [n];
+    ld.param.u32 %r_reps, [reps];
+
+    setp.ge.u32  %p, %r_tid, %r_n;
+    @%p ret;
+
+    cvt.u64.u32  %r_aa, %r_tid;
+    shl.b64      %r_aa, %r_aa, 2;
+    add.u64      %r_aa, %r_aa, %r_pa;
+
+    cvt.u64.u32  %r_ab, %r_tid;
+    shl.b64      %r_ab, %r_ab, 2;
+    add.u64      %r_ab, %r_ab, %r_pb;
+
+    cvt.u64.u32  %r_ac, %r_tid;
+    shl.b64      %r_ac, %r_ac, 2;
+    add.u64      %r_ac, %r_ac, %r_pc;
+
+    ld.global.b32 %r_va, [%r_aa];
+    ld.global.b32 %r_vb, [%r_ab];
+
+    mov.s32 %r_acc, 0;
+    mov.u32 %r_i, 0;
+
+LOOP_INT4:
+    // lower nibbles: byte[k] & 0x0F
+    and.b32      %r_ua, %r_va, 0x0F0F0F0F;
+    and.b32      %r_ub, %r_vb, 0x0F0F0F0F;
+    dp4a.s32.s32 %r_acc, %r_ua, %r_ub, %r_acc;
+
+    // upper nibbles: (byte[k] >> 4) & 0x0F
+    and.b32      %r_ua, %r_va, 0xF0F0F0F0;
+    shr.u32      %r_ua, %r_ua, 4;
+    and.b32      %r_ub, %r_vb, 0xF0F0F0F0;
+    shr.u32      %r_ub, %r_ub, 4;
+    dp4a.s32.s32 %r_acc, %r_ua, %r_ub, %r_acc;
+
+    add.u32     %r_i, %r_i, 2;
+    setp.lt.u32 %p, %r_i, %r_reps;
+    @%p bra LOOP_INT4;
+
+    st.global.s32 [%r_ac], %r_acc;
+    ret;
+}
+
+// --- Bitwise XNOR + POPC (1-bit / binary neural nets) -----------------------
+// Binary weights: {-1, +1} encoded as bits
+// XNOR counts agreements, POPC sums them
+// Theoretical: 32x more ops/byte than INT8
+
+.visible .entry bitwise_xnor_popc(
+    .param .u64 ptr_a,
+    .param .u64 ptr_b,
+    .param .u64 ptr_c,
+    .param .u32 n,
+    .param .u32 reps
+) {
+    .reg .u32  %r_tid, %r_n, %r_reps, %r_i;
+    .reg .u64  %r_pa, %r_pb, %r_pc, %r_aa, %r_ab, %r_ac;
+    .reg .b32  %r_va, %r_vb, %r_xnor;
+    .reg .u32  %r_popc, %r_acc;
+    .reg .pred %p;
+
+    mov.u32      %r_tid,  %tid.x;
+    ld.param.u64 %r_pa,   [ptr_a];
+    ld.param.u64 %r_pb,   [ptr_b];
+    ld.param.u64 %r_pc,   [ptr_c];
+    ld.param.u32 %r_n,    [n];
+    ld.param.u32 %r_reps, [reps];
+
+    setp.ge.u32  %p, %r_tid, %r_n;
+    @%p ret;
+
+    cvt.u64.u32  %r_aa, %r_tid;
+    shl.b64      %r_aa, %r_aa, 2;
+    add.u64      %r_aa, %r_aa, %r_pa;
+
+    cvt.u64.u32  %r_ab, %r_tid;
+    shl.b64      %r_ab, %r_ab, 2;
+    add.u64      %r_ab, %r_ab, %r_pb;
+
+    cvt.u64.u32  %r_ac, %r_tid;
+    shl.b64      %r_ac, %r_ac, 2;
+    add.u64      %r_ac, %r_ac, %r_pc;
+
+    ld.global.b32 %r_va, [%r_aa];
+    ld.global.b32 %r_vb, [%r_ab];
+
+    mov.u32 %r_acc, 0;
+    mov.u32 %r_i, 0;
+
+LOOP_XNOR:
+    xor.b32  %r_xnor, %r_va, %r_vb;
+    not.b32  %r_xnor, %r_xnor;
+    popc.b32 %r_popc, %r_xnor;
+    add.u32  %r_acc, %r_acc, %r_popc;
+
+    xor.b32  %r_xnor, %r_va, %r_vb;
+    not.b32  %r_xnor, %r_xnor;
+    popc.b32 %r_popc, %r_xnor;
+    add.u32  %r_acc, %r_acc, %r_popc;
+
+    xor.b32  %r_xnor, %r_va, %r_vb;
+    not.b32  %r_xnor, %r_xnor;
+    popc.b32 %r_popc, %r_xnor;
+    add.u32  %r_acc, %r_acc, %r_popc;
+
+    xor.b32  %r_xnor, %r_va, %r_vb;
+    not.b32  %r_xnor, %r_xnor;
+    popc.b32 %r_popc, %r_xnor;
+    add.u32  %r_acc, %r_acc, %r_popc;
+
+    add.u32     %r_i, %r_i, 4;
+    setp.lt.u32 %p, %r_i, %r_reps;
+    @%p bra LOOP_XNOR;
+
+    st.global.u32 [%r_ac], %r_acc;
+    ret;
+}
+
+// --- INT32 MAD throughput (accumulator baseline) -----------------------------
+
+.visible .entry int32_mad(
+    .param .u64 ptr,
+    .param .u32 n,
+    .param .u32 reps
+) {
+    .reg .u32  %r_tid, %r_n, %r_reps, %r_i;
+    .reg .u64  %r_ptr, %r_addr;
+    .reg .s32  %r_a, %r_b, %r_c;
+    .reg .pred %p;
+
+    mov.u32      %r_tid,  %tid.x;
+    ld.param.u64 %r_ptr,  [ptr];
+    ld.param.u32 %r_n,    [n];
+    ld.param.u32 %r_reps, [reps];
+
+    setp.ge.u32  %p, %r_tid, %r_n;
+    @%p ret;
+
+    cvt.u64.u32  %r_addr, %r_tid;
+    shl.b64      %r_addr, %r_addr, 2;
+    add.u64      %r_addr, %r_addr, %r_ptr;
+
+    ld.global.s32 %r_a, [%r_addr];
+
+    mov.s32 %r_b, 3;
+    mov.s32 %r_c, 1;
+
+    mov.u32 %r_i, 0;
+
+LOOP_I32:
+    mad.lo.s32 %r_a, %r_a, %r_b, %r_c;
+    mad.lo.s32 %r_a, %r_a, %r_b, %r_c;
+    mad.lo.s32 %r_a, %r_a, %r_b, %r_c;
+    mad.lo.s32 %r_a, %r_a, %r_b, %r_c;
+    mad.lo.s32 %r_a, %r_a, %r_b, %r_c;
+    mad.lo.s32 %r_a, %r_a, %r_b, %r_c;
+    mad.lo.s32 %r_a, %r_a, %r_b, %r_c;
+    mad.lo.s32 %r_a, %r_a, %r_b, %r_c;
+
+    add.u32     %r_i, %r_i, 8;
+    setp.lt.u32 %p, %r_i, %r_reps;
+    @%p bra LOOP_I32;
+
+    st.global.s32 [%r_addr], %r_a;
+    ret;
+}

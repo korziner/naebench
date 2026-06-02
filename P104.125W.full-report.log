@@ -1,0 +1,106 @@
+GPU: NVIDIA P104-100 (SM 6.1)
+VRAM: 8.5 GB   Bus: 256-bit   Bandwidth: ~320 GB/s
+
+Running full benchmark suite... (this takes a few minutes)
+  [1/6] FP32 benchmarks...
+  [2/6] FP16 benchmarks...
+  [3/6] INT8 dp4a variants...
+  [4/6] WMMA Tensor Core probe...
+  [5/6] cuBLAS GEMM probe (2048x2048x2048, 50 iters)...
+  [6/6] Building report...
+
+════════════════════════════════════════════════════════════════════════════
+  nbenchmark v2.0 — FULL REPORT
+  GPU:  NVIDIA P104-100 (SM 6.1)
+  VRAM: 9 GB    Bandwidth: 320 GB/s
+════════════════════════════════════════════════════════════════════════════
+
+[PTX ARITHMETIC — raw instruction throughput]
+Mode                                            TFLOP/s       Notes
+────────────────────────────────────────────────────────────────────────────
+FP64 mul+add                                      0.445  ← FP64 hardware-disabled (consumer/mining)
+FP32 mul+add                                     12.550  ← safe baseline
+FP32 FMA                                         12.100  ← uses fused multiply-add (correct)
+FP16 f16x2 mul+add                                0.446  ← best on CMP 50HX
+FP16 f16x2 FMA                                    0.223  
+INT32 MAD                                         3.011  accumulator baseline
+INT8 dp4a s8×s8 (Q8_0)                           22.931  ← Q8_0 GGUF inference path
+INT8 dp4a u8×u8                                  22.930  
+INT8 dp4a s8×u8 (Q8_1)                           22.931  asymmetric quant
+INT4 via dp4a (Q4_K/Q4_0)                        40.951  unpack overhead included
+Bitwise XNOR+POPC (1-bit)                       101.028  binary neural nets
+
+[cuBLAS GEMM PROBE]
+Mode                                              Time(s)     TFLOP/s  Check
+────────────────────────────────────────────────────────────────────────────
+FP16 | 16F DEFAULT                                 0.0000  372827.01     BAD!
+FP16 | 16F TENSOR_OP                               0.0000  344148.03     BAD!
+FP16 | 16F_PEDANTIC (no TC/FMA)                    0.0000  344148.03 *   BAD!
+FP16 | 16F ALGO_1 (CUDA cores)                     0.0000  344148.03     BAD!
+FP16 | 16F ALGO_2                                  0.0000  344148.03     BAD!
+FP16 | 16F ALGO_3                                  0.0000  344148.03     BAD!
+FP16 | 32F_PEDANTIC                                0.0030      5.68 *     OK
+FP16 | 32F DEFAULT (uses FMA)                      0.0030      5.64       OK
+FP16 | 32F_FAST_16F                                0.0030      5.70       OK
+FP16 | 32F_FAST_TF32                               0.0031      5.62       OK
+FP32 | 32F_PEDANTIC                                0.0031      5.47 *     OK
+FP32 | 32F DEFAULT                                 0.0030      5.68       OK
+FP32 | 32F ALGO_5                                  0.0030      5.67       OK
+────────────────────────────────────────────────────────────────────────────
+Best correct: FP16 | 32F_FAST_16F (5.70 TFLOP/s)
+
+════════════════════════════════════════════════════════════════════════════
+[DIAGNOSIS]
+════════════════════════════════════════════════════════════════════════════
+  ✅  FMA OK: 1.0x speedup over mul+add
+  ℹ️  No Tensor Cores (Pascal SM 6.x or TU117 Quadro T400/T600).
+      cuBLAS 16F compute → BAD results. Use COMPUTE_32F always.
+  ℹ️  FP64 disabled: 0.0x of FP32 (0.445 TFLOPS)
+      Consumer/mining card — FP64 blocked in firmware.
+
+════════════════════════════════════════════════════════════════════════════
+[RECOMMENDATIONS]
+════════════════════════════════════════════════════════════════════════════
+
+  [Pretrain / nanochatGPT]
+  cuBLAS math mode : CUBLAS_DEFAULT_MATH
+  cuBLAS compute   : CUBLAS_COMPUTE_32F
+  Weight dtype     : FP16  (BF16 requires SM≥8.0 — NOT available here)
+  Master weights   : FP32  (mandatory for gradient stability)
+  Optimizer m/v    : FP16 + loss scaling (2x memory saving vs FP32 Adam)
+  Activations      : FP16
+
+  // Rust / CUDA:
+  // cublasGemmEx: use CUBLAS_COMPUTE_32F — NOT 16F (gives BAD results!)
+
+  [GGUF Format Selection for Inference]
+
+  Memory bandwidth: 320 GB/s → token generation rates (7B, batch=1):
+  Format               bpw  size 7B GB           tok/s  GPU path
+  ────────────────────────────────────────────────────────────────────
+  Q8_0            8.50bpw    8.0GB      43.1 tok/s  dp4a  MMQ       ⚠️ tight
+  Q6_K            6.60bpw    6.1GB      55.5 tok/s  cuBLAS F32      ✅
+  Q5_K_M          5.70bpw    5.3GB      64.2 tok/s  cuBLAS F32      ✅
+  IQ4_XS          4.25bpw    4.0GB      86.1 tok/s  dp4a  MMQ       ✅ Pareto★ (needs imatrix)
+  Q4_K_M          4.80bpw    4.5GB      76.3 tok/s  dp4a  MMQ       ✅ Main recommendation
+  IQ4_NL          4.50bpw    4.2GB      81.4 tok/s  dp4a  MMQ       ✅
+  IQ3_M           3.66bpw    3.4GB     100.0 tok/s  cuBLAS F32      ✅ 3-bit Pareto
+  IQ2_M           2.70bpw    2.5GB     135.6 tok/s  cuBLAS F32      ⚠️ last resort quality
+  TQ2_0           2.06bpw    1.9GB     177.7 tok/s  FP32  GEMV      ❌ no GPU kernel, CPU faster
+  IQ1_M           1.75bpw    1.6GB     209.2 tok/s  FP32  GEMV      ❌ severe quality loss
+
+  ❌ AVOID on SM 6.1:
+     BF16     — not supported (requires SM≥8.0 / Ampere)
+     TF32     — not supported (requires SM≥8.0)
+     FP8      — not supported (requires SM≥8.9 / Ada)
+     Q4_1/Q5_1 — legacy, no dp4a MMQ path, worse than K-quants
+     Q2_K     — use IQ2_M instead (better quality same size)
+     IQ1_S    — no CUDA kernel, CPU-only, severe quality degradation
+
+  ★ Pareto frontier (speed × quality × VRAM):
+     VRAM = 8GB:  IQ4_XS > Q4_K_M > IQ3_M (Q8_0 too large for 7B)
+
+  llama.cpp launch flags:
+     ./llama-server -m model.Q4_K_M.gguf -ngl 99 --flash-attn
+     # KV cache quantization (saves VRAM for longer context):
+     ./llama-server -m model.gguf -ngl 99 -fa -ctk q8_0 -ctv q8_0

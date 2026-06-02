@@ -1,0 +1,47 @@
+
+════════════════════════════════════════════════════════════════════════════════════════════════════
+  GGUF Format → GPU Instruction Path Mapping
+  Pascal (SM 6.x): no TC  |  Turing RTX (SM 7.5): has TC  |  Turing CMP: broken TC
+════════════════════════════════════════════════════════════════════════════════════════════════════
+Format         bpw   7B GB   Type/Family  GPU Path        Pascal/CMP      Notes
+────────────────────────────────────────────────────────────────────────────────────────────────────
+F32          32.00   28.0G Float          cuBLAS F32      ★★ ok           Full precision, large
+F16          16.00   14.0G Float          cuBLAS F32*     ★★ *32F         Pascal: MUST use COMPUTE_32F
+BF16         16.00   14.0G Float          ❌ N/A           ❌ N/A           Requires SM 8.0+
+Q8_0          8.50    8.0G Legacy         dp4a  MMQ       ★★★★★           Fastest+best on Pascal!
+Q5_1          5.90    5.5G Legacy         cuBLAS F32      ★★              Legacy, no MMQ. Use Q5_K_M
+Q5_0          5.50    5.1G Legacy         cuBLAS F32      ★★              Legacy, no MMQ
+Q4_1          4.90    4.6G Legacy         cuBLAS F32      ★★              Legacy. Use Q4_K_M instead
+Q4_0          4.50    4.2G Legacy         dp4a  MMQ       ★★★             Has MMQ path but K-quants better
+Q6_K          6.60    6.1G K-Quant        cuBLAS F32      ★★              Best quality FP32 path
+Q5_K_M        5.70    5.3G K-Quant        cuBLAS F32      ★★              Good quality/size
+Q5_K_S        5.50    5.1G K-Quant        cuBLAS F32      ★★              
+Q4_K_M        4.80    4.5G K-Quant        dp4a  MMQ       ★★★★★           ← MAIN RECOMMENDATION
+Q4_K_S        4.40    4.1G K-Quant        dp4a  MMQ       ★★★★            
+Q3_K_L        4.00    3.8G K-Quant        cuBLAS F32      ★★              Mixed Q3+Q4 layers
+Q3_K_M        3.74    3.5G K-Quant        cuBLAS F32      ★★              
+Q3_K_S        3.41    3.2G K-Quant        cuBLAS F32      ★★              
+Q2_K          2.63    2.5G K-Quant        cuBLAS F32      ★               Bad quality, use IQ2_M
+Q2_K_S        2.63    2.5G K-Quant        cuBLAS F32      ★               Slightly better Q2_K
+IQ4_XS        4.25    4.0G I-Quant        dp4a  MMQ       ★★★★★           ← Pareto★ (needs imatrix)
+IQ4_NL        4.50    4.2G I-Quant        dp4a  MMQ       ★★★★            Non-linear LUT, fast
+IQ3_M         3.66    3.4G I-Quant        cuBLAS F32      ★★              3-bit Pareto
+IQ3_S         3.44    3.2G I-Quant        cuBLAS F32      ★★              
+IQ3_XS        3.30    3.1G I-Quant        cuBLAS F32      ★★              
+IQ3_XXS       3.06    2.9G I-Quant        cuBLAS F32      ★★              
+IQ2_M         2.70    2.5G I-Quant        cuBLAS F32      ★★              Best 2-bit on GPU
+IQ2_S         2.50    2.3G I-Quant        cuBLAS F32      ★★              
+IQ2_XS        2.31    2.2G I-Quant        cuBLAS F32      ★★              
+IQ2_XXS       2.06    1.9G I-Quant        cuBLAS F32      ★               
+IQ1_M         1.75    1.6G I-Quant        FP32  GEMV      ★               No CUDA MMQ kernel
+IQ1_S         1.56    1.5G I-Quant        FP32  GEMV      ★               No CUDA MMQ kernel
+TQ2_0         2.06    1.9G Ternary        FP32  GEMV      ★               Ternary {-1,0,+1} GPU slow
+TQ1_0         1.69    1.6G Ternary        FP32  GEMV      ★               Ternary packed, GPU slow
+turbo4        4.00    3.8G TurboQ         dp4a (TQ4_1S)   ★★★             KV-cache only, 3.5x fast
+turbo3        3.00    2.8G TurboQ         FP32  dequant   ★★              KV-cache only
+turbo2        2.00    1.9G TurboQ         FP32  dequant   ★               KV-cache only, long ctx
+════════════════════════════════════════════════════════════════════════════════════════════════════
+  * cuBLAS F32: Pascal must use CUBLAS_COMPUTE_32F (not COMPUTE_16F → BAD results!)
+  dp4a MMQ: fastest path on Pascal! 7x faster than cuBLAS for inference.
+  BF16/TF32/FP8: NOT available on Pascal (SM 6.x) or Turing (SM 7.5).
+  TurboQuant (turbo2/3/4): KV-cache quantization only, not weight quantization.

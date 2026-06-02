@@ -1,0 +1,115 @@
+// FP16 PTX kernels: f16x2 packed operations
+// f16x2 = two fp16 values packed into one 32-bit register
+// SM 6.1+: mul.f16x2 and add.f16x2 available
+// On CMP 50HX: FMA path may be slow, f16x2 mul+add is FASTEST
+
+.version 8.0
+.target sm_61
+.address_size 64
+
+// --- FP16 f16x2 MUL+ADD (no FMA) -------------------------------------------
+// On CMP 50HX: ~22 TFLOPS -- best path for FP16 on broken FMA cards
+
+.visible .entry fp16_muladd(
+    .param .u64 ptr,
+    .param .u32 n,
+    .param .u32 reps
+) {
+    .reg .u32  %r_tid, %r_n, %r_reps, %r_i;
+    .reg .u64  %r_ptr, %r_addr;
+    .reg .b32  %r_a, %r_b, %r_c, %r_t;
+    .reg .pred %p;
+
+    mov.u32       %r_tid,  %tid.x;
+    ld.param.u64  %r_ptr,  [ptr];
+    ld.param.u32  %r_n,    [n];
+    ld.param.u32  %r_reps, [reps];
+
+    setp.ge.u32   %p, %r_tid, %r_n;
+    @%p ret;
+
+    cvt.u64.u32   %r_addr, %r_tid;
+    shl.b64       %r_addr, %r_addr, 2;
+    add.u64       %r_addr, %r_addr, %r_ptr;
+
+    ld.global.b32 %r_a, [%r_addr];
+
+    mov.b32 %r_b, 0x3C003C00;
+    mov.b32 %r_c, 0x23D723D7;
+
+    mov.u32 %r_i, 0;
+
+LOOP_F16_MA:
+    mul.f16x2  %r_t, %r_a, %r_b;
+    add.f16x2  %r_a, %r_t, %r_c;
+    mul.f16x2  %r_t, %r_a, %r_b;
+    add.f16x2  %r_a, %r_t, %r_c;
+    mul.f16x2  %r_t, %r_a, %r_b;
+    add.f16x2  %r_a, %r_t, %r_c;
+    mul.f16x2  %r_t, %r_a, %r_b;
+    add.f16x2  %r_a, %r_t, %r_c;
+    mul.f16x2  %r_t, %r_a, %r_b;
+    add.f16x2  %r_a, %r_t, %r_c;
+    mul.f16x2  %r_t, %r_a, %r_b;
+    add.f16x2  %r_a, %r_t, %r_c;
+    mul.f16x2  %r_t, %r_a, %r_b;
+    add.f16x2  %r_a, %r_t, %r_c;
+    mul.f16x2  %r_t, %r_a, %r_b;
+    add.f16x2  %r_a, %r_t, %r_c;
+
+    add.u32     %r_i, %r_i, 32;
+    setp.lt.u32 %p, %r_i, %r_reps;
+    @%p bra LOOP_F16_MA;
+
+    st.global.b32 [%r_addr], %r_a;
+    ret;
+}
+
+// --- FP16 f16x2 FMA ---------------------------------------------------------
+
+.visible .entry fp16_fma(
+    .param .u64 ptr,
+    .param .u32 n,
+    .param .u32 reps
+) {
+    .reg .u32  %r_tid, %r_n, %r_reps, %r_i;
+    .reg .u64  %r_ptr, %r_addr;
+    .reg .b32  %r_a, %r_b, %r_c;
+    .reg .pred %p;
+
+    mov.u32       %r_tid,  %tid.x;
+    ld.param.u64  %r_ptr,  [ptr];
+    ld.param.u32  %r_n,    [n];
+    ld.param.u32  %r_reps, [reps];
+
+    setp.ge.u32   %p, %r_tid, %r_n;
+    @%p ret;
+
+    cvt.u64.u32   %r_addr, %r_tid;
+    shl.b64       %r_addr, %r_addr, 2;
+    add.u64       %r_addr, %r_addr, %r_ptr;
+
+    ld.global.b32 %r_a, [%r_addr];
+
+    mov.b32 %r_b, 0x3C003C00;
+    mov.b32 %r_c, 0x23D723D7;
+
+    mov.u32 %r_i, 0;
+
+LOOP_F16_FMA:
+    fma.rn.f16x2  %r_a, %r_a, %r_b, %r_c;
+    fma.rn.f16x2  %r_a, %r_a, %r_b, %r_c;
+    fma.rn.f16x2  %r_a, %r_a, %r_b, %r_c;
+    fma.rn.f16x2  %r_a, %r_a, %r_b, %r_c;
+    fma.rn.f16x2  %r_a, %r_a, %r_b, %r_c;
+    fma.rn.f16x2  %r_a, %r_a, %r_b, %r_c;
+    fma.rn.f16x2  %r_a, %r_a, %r_b, %r_c;
+    fma.rn.f16x2  %r_a, %r_a, %r_b, %r_c;
+
+    add.u32     %r_i, %r_i, 16;
+    setp.lt.u32 %p, %r_i, %r_reps;
+    @%p bra LOOP_F16_FMA;
+
+    st.global.b32 [%r_addr], %r_a;
+    ret;
+}

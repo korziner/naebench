@@ -1,0 +1,166 @@
+// FP32 / FP64 PTX kernels: explicit mul+add (no FMA) and FMA
+// Compatible: SM 6.0+ (Pascal GP100), SM 6.1+ (P102/P104/P106), SM 7.5 (Turing)
+
+.version 8.0
+.target sm_60
+.address_size 64
+
+// --- FP32 explicit MUL+ADD (no FMA) -----------------------------------------
+// Each thread processes one float, doing reps iterations of (a = a*b + c)
+// Using separate mul.f32 + add.f32 to prevent compiler fusing into FMA.
+
+.visible .entry fp32_muladd(
+    .param .u64 ptr,
+    .param .u32 n,
+    .param .u32 reps
+) {
+    .reg .u32 %r_tid, %r_n, %r_reps, %r_i;
+    .reg .u64 %r_ptr, %r_addr;
+    .reg .f32 %r_a, %r_b, %r_c, %r_t;
+    .reg .pred %p;
+
+    mov.u32       %r_tid,  %tid.x;
+    ld.param.u64  %r_ptr,  [ptr];
+    ld.param.u32  %r_n,    [n];
+    ld.param.u32  %r_reps, [reps];
+
+    setp.ge.u32   %p, %r_tid, %r_n;
+    @%p ret;
+
+    cvt.u64.u32   %r_addr, %r_tid;
+    shl.b64       %r_addr, %r_addr, 2;
+    add.u64       %r_addr, %r_addr, %r_ptr;
+
+    ld.global.f32 %r_a, [%r_addr];
+
+    mov.f32 %r_b, 0f3F800000;   // 1.0f
+    mov.f32 %r_c, 0f3C23D70A;   // 0.01f
+
+    mov.u32 %r_i, 0;
+
+LOOP_FP32_MA:
+    mul.f32  %r_t, %r_a, %r_b;
+    add.f32  %r_a, %r_t, %r_c;
+    mul.f32  %r_t, %r_a, %r_b;
+    add.f32  %r_a, %r_t, %r_c;
+    mul.f32  %r_t, %r_a, %r_b;
+    add.f32  %r_a, %r_t, %r_c;
+    mul.f32  %r_t, %r_a, %r_b;
+    add.f32  %r_a, %r_t, %r_c;
+    mul.f32  %r_t, %r_a, %r_b;
+    add.f32  %r_a, %r_t, %r_c;
+    mul.f32  %r_t, %r_a, %r_b;
+    add.f32  %r_a, %r_t, %r_c;
+    mul.f32  %r_t, %r_a, %r_b;
+    add.f32  %r_a, %r_t, %r_c;
+    mul.f32  %r_t, %r_a, %r_b;
+    add.f32  %r_a, %r_t, %r_c;
+
+    add.u32     %r_i, %r_i, 16;
+    setp.lt.u32 %p, %r_i, %r_reps;
+    @%p bra LOOP_FP32_MA;
+
+    st.global.f32 [%r_addr], %r_a;
+    ret;
+}
+
+// --- FP32 FMA ----------------------------------------------------------------
+// Uses fma.rn.f32 -- fused multiply-add.
+// On CMP/mining cards this path is BROKEN (14x slower).
+
+.visible .entry fp32_fma(
+    .param .u64 ptr,
+    .param .u32 n,
+    .param .u32 reps
+) {
+    .reg .u32 %r_tid, %r_n, %r_reps, %r_i;
+    .reg .u64 %r_ptr, %r_addr;
+    .reg .f32 %r_a, %r_b, %r_c;
+    .reg .pred %p;
+
+    mov.u32       %r_tid,  %tid.x;
+    ld.param.u64  %r_ptr,  [ptr];
+    ld.param.u32  %r_n,    [n];
+    ld.param.u32  %r_reps, [reps];
+
+    setp.ge.u32   %p, %r_tid, %r_n;
+    @%p ret;
+
+    cvt.u64.u32   %r_addr, %r_tid;
+    shl.b64       %r_addr, %r_addr, 2;
+    add.u64       %r_addr, %r_addr, %r_ptr;
+
+    ld.global.f32 %r_a, [%r_addr];
+
+    mov.f32 %r_b, 0f3F800000;
+    mov.f32 %r_c, 0f3C23D70A;
+
+    mov.u32 %r_i, 0;
+
+LOOP_FP32_FMA:
+    fma.rn.f32  %r_a, %r_a, %r_b, %r_c;
+    fma.rn.f32  %r_a, %r_a, %r_b, %r_c;
+    fma.rn.f32  %r_a, %r_a, %r_b, %r_c;
+    fma.rn.f32  %r_a, %r_a, %r_b, %r_c;
+    fma.rn.f32  %r_a, %r_a, %r_b, %r_c;
+    fma.rn.f32  %r_a, %r_a, %r_b, %r_c;
+    fma.rn.f32  %r_a, %r_a, %r_b, %r_c;
+    fma.rn.f32  %r_a, %r_a, %r_b, %r_c;
+
+    add.u32     %r_i, %r_i, 16;
+    setp.lt.u32 %p, %r_i, %r_reps;
+    @%p bra LOOP_FP32_FMA;
+
+    st.global.f32 [%r_addr], %r_a;
+    ret;
+}
+
+// --- FP64 MUL+ADD ------------------------------------------------------------
+// Diagnoses hardware FP64: GP100 is 1:2 FP64/FP32, consumer Pascal is 1/32.
+
+.visible .entry fp64_muladd(
+    .param .u64 ptr,
+    .param .u32 n,
+    .param .u32 reps
+) {
+    .reg .u32 %r_tid, %r_n, %r_reps, %r_i;
+    .reg .u64 %r_ptr, %r_addr;
+    .reg .f64 %r_a, %r_b, %r_c, %r_t;
+    .reg .pred %p;
+
+    mov.u32       %r_tid,  %tid.x;
+    ld.param.u64  %r_ptr,  [ptr];
+    ld.param.u32  %r_n,    [n];
+    ld.param.u32  %r_reps, [reps];
+
+    setp.ge.u32   %p, %r_tid, %r_n;
+    @%p ret;
+
+    cvt.u64.u32   %r_addr, %r_tid;
+    shl.b64       %r_addr, %r_addr, 3;    // *8 bytes (double)
+    add.u64       %r_addr, %r_addr, %r_ptr;
+
+    ld.global.f64 %r_a, [%r_addr];
+
+    mov.f64 %r_b, 0d3FF0000000000000;   // 1.0
+    mov.f64 %r_c, 0d3F847AE147AE147B;   // 0.01
+
+    mov.u32 %r_i, 0;
+
+LOOP_FP64_MA:
+    mul.f64  %r_t, %r_a, %r_b;
+    add.f64  %r_a, %r_t, %r_c;
+    mul.f64  %r_t, %r_a, %r_b;
+    add.f64  %r_a, %r_t, %r_c;
+    mul.f64  %r_t, %r_a, %r_b;
+    add.f64  %r_a, %r_t, %r_c;
+    mul.f64  %r_t, %r_a, %r_b;
+    add.f64  %r_a, %r_t, %r_c;
+
+    add.u32     %r_i, %r_i, 8;
+    setp.lt.u32 %p, %r_i, %r_reps;
+    @%p bra LOOP_FP64_MA;
+
+    st.global.f64 [%r_addr], %r_a;
+    ret;
+}
