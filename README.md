@@ -98,7 +98,83 @@ cargo build --release
 # With specific device
 ./nbenchmark full-report --device 1
 ./nbenchmark cublas-probe --n 134217728 --reps 16384
-```
+Full benchmark for NVIDIA Pascal (SM 6.x) and Turing (SM 7.5) GPUs.
+Reveals broken FMA / Tensor Cores on NVIDIA CMP mining cards.
+Maps all GGUF quantization formats to GPU instruction paths.
+
+TARGET HARDWARE:
+Pascal: P106-100 (6GB), P104-100 (8GB), P102-100 (10GB), Tesla P100 (16GB)
+Turing: CMP 50HX, RTX 2060 (6GB), RTX 2060 SUPER (8GB),
+RTX 2060 12GB, Quadro T400, RTX 2070, RTX 2080 Ti
+
+KNOWN RESULTS:
+P102-100 (Pascal):  FP32 mul+add ~5.6 TF | FP32 FMA ~10.5 TF | INT8 ~41 TOPS
+CMP 50HX (Turing):  FP32 mul+add ~5.9 TF | FP32 FMA ~0.42 TF (BROKEN!) | INT8 ~1.7 TOPS
+RTX 2060 (Turing):  FP32 ~6.5 TF | FP16 TC ~52 TF | INT8 TC ~104 TOPS
+RTX 2060 SUPER:     FP32 ~7.2 TF | FP16 TC ~57 TF | BW 448 GB/s
+RTX 2060 12GB:      FP32 ~7.3 TF | FP16 TC ~58 TF | BW 360 GB/s | VRAM 12GB
+Quadro T400:        FP32 ~1.1 TF | NO TC (TU117!) | BW 80 GB/s | VRAM 4GB
+
+GGUF GPU PATHS:
+dp4a MMQ:    Q8_0, Q4_0, Q4_K_M, IQ4_XS, IQ4_NL     → fastest on Pascal!
+cuBLAS F32:  Q5_K_M, Q6_K, Q3_K, IQ2-3 series        → 7x slower than dp4a
+FP32 GEMV:   TQ1_0, TQ2_0, IQ1_S/M                   → avoid on GPU
+FORBIDDEN:   BF16, TF32, FP8 (not available SM<8.0)
+
+
+Usage: nbenchmark [OPTIONS] <COMMAND>
+
+Commands:
+  fp32          FP32 explicit mul+add (no FMA) — safe baseline
+  fp32-fma      FP32 FMA — reveals CMP breakage if 14x slower than fp32
+  fp64          FP64 mul+add — diagnose hardware FP64 (GP100 vs consumer)
+  f16           FP16 f16x2 explicit mul+add — best path on CMP 50HX
+  f16-fma       FP16 f16x2 FMA
+  int8          INT8 dp4a all variants: s8s8 / u8u8 / s8u8 (Q8_0/Q8_1 paths)
+  int4          INT4 emulated via dp4a (Q4_K/Q4_0 GPU path)
+  int32         INT32 MAD — accumulator throughput baseline
+  bitwise       Bitwise XNOR + POPC — 1-bit / binary neural nets
+  all-ptx       All PTX: fp32/fp64/fp16/int8/int4/bitwise/int32
+  fma-compare   FP32 vs FMA comparison (CMP diagnostic)
+  cublas-probe  KEY: cuBLAS GEMM probe — all compute modes, correctness check
+  wmma-probe    WMMA direct Tensor Core test (SM 7.5+ only, bypasses cuBLAS)
+  cmp-detect    Quick CMP auto-detect: broken FMA + TC?
+  gguf-table    Print GGUF format → GPU path mapping table
+  gpu-table     Print known GPU specs comparison table
+  full-report   Everything: all PTX + FMA compare + cuBLAS + WMMA + recommendations
+  help          Print this message or the help of the given subcommand(s)
+
+Options:
+      --n <N>
+          Number of elements for PTX benchmarks
+          
+          [default: 67108864]
+
+      --reps <REPS>
+          Arithmetic repetitions per GPU thread
+          
+          [default: 16384]
+
+      --m <M>
+          GEMM matrix dimension M=N=K for cuBLAS probe
+          
+          [default: 2048]
+
+      --gemm-iters <GEMM_ITERS>
+          GEMM iterations for stable timing
+          
+          [default: 50]
+
+      --device <DEVICE>
+          CUDA device index (0 = first GPU)
+          
+          [default: 0]
+
+  -h, --help
+          Print help (see a summary with '-h')
+
+  -V, --version
+  ```
 
 ## GGUF Format → GPU Path
 
