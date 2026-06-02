@@ -99,6 +99,40 @@ cargo build --release
 # With specific device
 ./nbenchmark full-report --device 1
 ./nbenchmark cublas-probe --n 134217728 --reps 16384
+
+tree
+
+├── Cargo.toml
+├── no_cublas
+│   ├── dispatch_guide.md
+│   └── rust_kernels
+│       ├── Cargo.toml
+│       └── src
+│           └── main.rs
+├── README.md
+├── src
+│   ├── cublas_probe.rs
+│   ├── cuda_bindings.rs
+│   ├── fp16.ptx
+│   ├── fp32.ptx
+│   ├── gpu_db.rs
+│   ├── int8.ptx
+│   ├── kernels
+│   │   ├── fp16.cubin
+│   │   ├── fp16.ptx
+│   │   ├── fp32.cubin
+│   │   ├── fp32.ptx
+│   │   ├── int8.cubin
+│   │   ├── int8.ptx
+│   │   ├── kernels.ptx
+│   │   ├── wmma.ptx
+│   ├── kernels.ptx
+│   ├── main.rs
+│   ├── ptx_runner.rs
+│   ├── report.rs
+│   ├── wmma.ptx
+
+
 Full benchmark for NVIDIA Pascal (SM 6.x) and Turing (SM 7.5) GPUs.
 Reveals broken FMA / Tensor Cores on NVIDIA CMP mining cards.
 Maps all GGUF quantization formats to GPU instruction paths.
