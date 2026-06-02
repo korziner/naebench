@@ -1,4 +1,8 @@
-# nbenchmark v2.0
+# nbenchmark v2.0 -see details of you retro card! )
+
+<img width="527" height="594" alt="image" src="https://github.com/user-attachments/assets/149af52e-4de3-42ac-b860-53823e31dbc8" />
+
+<img width="1789" height="914" alt="image" src="https://github.com/user-attachments/assets/209ed631-c8d6-4a80-ae40-0b2b1d413324" />
 
 **Full Pascal + Turing GPU benchmark** — PTX kernels, cuBLAS probe, GGUF format advisor.
 
